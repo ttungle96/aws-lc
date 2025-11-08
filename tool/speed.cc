@@ -2913,10 +2913,14 @@ static int CMAC_KDF_x4(uint8_t *in, uint8_t *out, __m128i *rk) {
 }
 
 /* 
-Left-shift a 128-bit register: https://words.filippo.io/xaes-256-gcm/ (line 2)
-If MSB₁(L) = 0: K1 = L << 1;
-Else: K1 = (L << 1) ⊕ (0x00, ..., 0x00, 0x87)
-*/
+The following function performs the step #2 of CMAC specified in: 
+https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38b.pdf#page=14 
+Only K1 is needed as the CMAC input is always a complete block. 
+Also note that K1 only depends on the input main key. 
+Pseudocode:   
+    If MSB(L) = 0: K1 = L << 1;
+    Else: K1 = (L << 1) ^ (0x00, ..., 0x00, 0x87) 
+*/ 
 #define BINARY_FIELD_MUL_X_128(out, in)             \
 do {                                                \
     unsigned i;                                     \
@@ -3283,6 +3287,10 @@ bool Speed(const std::vector<std::string> &args) {
        !SpeedEvpCipherGeneric(EVP_aes_128_gcm(), "EVP-AES-128-GCM", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_192_gcm(), "EVP-AES-192-GCM", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_256_gcm(), "EVP-AES-256-GCM", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_xaes_256_gcm(), "EVP-XAES-256-GCM", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_key_commit(), "EVP-XAES-256-GCM-KEY-COMMIT", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_avx512(), "EVP-XAES-256-GCM-AVX512", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_key_commit_avx512(), "EVP-XAES-256-GCM-KEY-COMMIT-AVX512", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_128_ctr(), "EVP-AES-128-CTR", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_192_ctr(), "EVP-AES-192-CTR", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_256_ctr(), "EVP-AES-256-CTR", kTLSADLen, selected) ||
