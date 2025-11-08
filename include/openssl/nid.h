@@ -4386,6 +4386,27 @@ extern "C" {
 #define NID_SecP384r1MLKEM1024 998
 #define OBJ_SecP384r1MLKEM1024 1L, 3L, 6L, 1L, 4L, 1L, 42235L, 6L
 
+#define SN_xaes_256_gcm "id-xaes256-GCM"
+#define LN_xaes_256_gcm "xaes-256-gcm"
+#define NID_xaes_256_gcm 999
+#define OBJ_xaes_256_gcm 2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 49L
+
+#define SN_xaes_256_gcm_avx512 "id-xaes256-GCM-AVX512"
+#define LN_xaes_256_gcm_avx512 "xaes-256-gcm-avx512"
+#define NID_xaes_256_gcm_avx512 1000
+#define OBJ_xaes_256_gcm_avx512 2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 50L
+
+#define SN_xaes_256_gcm_key_commit "id-xaes256-GCM-KEY-COMMIT"
+#define LN_xaes_256_gcm_key_commit "xaes-256-gcm-key-commit"
+#define NID_xaes_256_gcm_key_commit 1001
+#define OBJ_xaes_256_gcm_key_commit 2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 51L
+
+#define SN_xaes_256_gcm_key_commit_avx512 "id-xaes256-GCM-KEY-COMMIT-AVX512"
+#define LN_xaes_256_gcm_key_commit_avx512 "xaes-256-gcm-key-commit-avx512"
+#define NID_xaes_256_gcm_key_commit_avx512 1002
+#define OBJ_xaes_256_gcm_key_commit_avx512 \
+  2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 52L
+
 #if defined(__cplusplus)
 } /* extern C */
 #endif

@@ -2820,7 +2820,340 @@ static bool parseStringVectorToIntegerVector(
   return true;
 }
 
+#define XAES_256_GCM_KEY_LENGTH      (AES_BLOCK_SIZE * 2)
+#define XAES_256_GCM_KEY_COMMIT_SIZE (AES_BLOCK_SIZE * 2)
+#define XAES_256_GCM_MAX_NONCE_SIZE  (AES_GCM_NONCE_LENGTH * 2)
+#define XAES_256_GCM_MIN_NONCE_SIZE  (20)
+
+#include <immintrin.h>
+#include <wmmintrin.h>
+
+struct xaes_256_gcm_ctx {
+  AES_KEY xaes_key;
+  uint8_t k1[AES_BLOCK_SIZE]; 
+  __m128i main_key[15];
+};
+
+#include <immintrin.h>
+#include <wmmintrin.h>
+
+__attribute__((target("vaes,avx512vl,aes,sse2")))
+static inline __m128i aes128_keyexpand(__m128i key) {
+    key = _mm_xor_si128(key, _mm_slli_si128(key, 4));
+    key = _mm_xor_si128(key, _mm_slli_si128(key, 4));
+    return _mm_xor_si128(key, _mm_slli_si128(key, 4));
+}
+
+#define KEYEXP128_H(K1, K2, I, S) _mm_xor_si128(aes128_keyexpand(K1), \
+        _mm_shuffle_epi32(_mm_aeskeygenassist_si128(K2, I), S))
+#define KEYEXP256(K1, K2, I)  KEYEXP128_H(K1, K2, I, 0xff)
+#define KEYEXP256_2(K1, K2) KEYEXP128_H(K1, K2, 0x00, 0xaa)
+
+__attribute__((target("vaes,avx512vl,aes,sse2")))
+static inline void aes_key_setup_enc(__m128i rk[], const __m256i cipherKey) {
+    // 256 bit key setup 
+    _mm256_storeu2_m128i(rk + 1, rk, cipherKey);
+    // rk[0] = _mm_loadu_si128((const block128*) cipherKey);
+    // rk[1] = _mm_loadu_si128((const block128*) (cipherKey+16));
+    rk[2] = KEYEXP256(rk[0], rk[1], 0x01);
+    rk[3] = KEYEXP256_2(rk[1], rk[2]);
+    rk[4] = KEYEXP256(rk[2], rk[3], 0x02);
+    rk[5] = KEYEXP256_2(rk[3], rk[4]);
+    rk[6] = KEYEXP256(rk[4], rk[5], 0x04);
+    rk[7] = KEYEXP256_2(rk[5], rk[6]);
+    rk[8] = KEYEXP256(rk[6], rk[7], 0x08);
+    rk[9] = KEYEXP256_2(rk[7], rk[8]);
+    rk[10] = KEYEXP256(rk[8], rk[9], 0x10);
+    rk[11] = KEYEXP256_2(rk[9], rk[10]);
+    rk[12] = KEYEXP256(rk[10], rk[11], 0x20);
+    rk[13] = KEYEXP256_2(rk[11], rk[12]);
+    rk[14] = KEYEXP256(rk[12], rk[13], 0x40);
+}
+
+#pragma GCC push_options
+#pragma GCC optimize ("unroll-loops")
+__attribute__((target("vaes,avx512vl,aes,sse2")))
+static int CMAC_KDF_x2(uint8_t *in, uint8_t *out, __m128i *rk) {
+    __m256i derived_key;
+    derived_key = _mm256_loadu_si256((__m256i*)in);
+    derived_key = _mm256_xor_si256(derived_key, _mm256_broadcast_i32x4(rk[0]));
+    
+    for(size_t r = 1; r < 14; ++r) {
+        derived_key = _mm256_aesenc_epi128(derived_key, 
+            _mm256_broadcast_i32x4(rk[r]));
+    }
+    
+    derived_key = _mm256_aesenclast_epi128(derived_key, 
+            _mm256_broadcast_i32x4(rk[14]));
+    
+    _mm256_storeu_si256((__m256i*)out, derived_key);
+
+    return 1;
+}
+
+#pragma GCC push_options
+#pragma GCC optimize ("unroll-loops")
+__attribute__((target("vaes,avx512f,aes,sse2")))
+static int CMAC_KDF_x4(uint8_t *in, uint8_t *out, __m128i *rk) {
+    __m512i derived_key;
+    derived_key = _mm512_loadu_si512((__m512i*)in);
+    derived_key = _mm512_xor_si512(derived_key, _mm512_broadcast_i32x4(rk[0]));
+    
+    for(size_t r = 1; r < 14; ++r) {
+        derived_key = _mm512_aesenc_epi128(derived_key, 
+            _mm512_broadcast_i32x4(rk[r]));
+    }
+    
+    derived_key = _mm512_aesenclast_epi128(derived_key, 
+            _mm512_broadcast_i32x4(rk[14]));
+    
+    _mm512_storeu_si512((__m512i*)out, derived_key);
+
+    return 1;
+}
+
+/* 
+Left-shift a 128-bit register: https://words.filippo.io/xaes-256-gcm/ (line 2)
+If MSB₁(L) = 0: K1 = L << 1;
+Else: K1 = (L << 1) ⊕ (0x00, ..., 0x00, 0x87)
+*/
+#define BINARY_FIELD_MUL_X_128(out, in)             \
+do {                                                \
+    unsigned i;                                     \
+    for (i = 0; i < 15; i++) {                      \
+        out[i] = (in[i] << 1) | (in[i+1] >> 7);     \
+    }                                               \
+    const uint8_t carry = in[0] >> 7;               \
+    out[i] = (in[i] << 1) ^ ((0 - carry) & 0x87);   \
+} while(0);
+
+__attribute__((target("vaes,avx512vl,aes,sse2")))
+static bool Speed_KDF_XAES_256_GCM_WITH_AVX_512() {
+    const uint8_t key[32] = {
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+    struct xaes_256_gcm_ctx xaes_ctx;
+    static const uint8_t kZeroIn[AES_BLOCK_SIZE] = {0};
+    uint8_t L[AES_BLOCK_SIZE];
+    AES_set_encrypt_key(key, XAES_256_GCM_KEY_LENGTH << 3, &xaes_ctx.xaes_key);
+    AES_encrypt(kZeroIn, L, &xaes_ctx.xaes_key);
+    BINARY_FIELD_MUL_X_128(xaes_ctx.k1, L);
+    aes_key_setup_enc(xaes_ctx.main_key, _mm256_loadu_si256((__m256i*)key));
+    
+    uint8_t M[32] = {0}, nonce[24] = {0};
+    uint8_t derived_key[32];
+    uint8_t *M1 = M, *M2 = &M[16];
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for(uint64_t i = 0; i < (uint64_t)1 << 24; ++i) {
+        OPENSSL_memcpy(nonce, &i, sizeof(i));
+        M[1] = 0x01; 
+        M[2] = 0x58; 
+        OPENSSL_memcpy(M + 4, nonce, 12);
+        OPENSSL_memcpy(M + 16, M, AES_BLOCK_SIZE);
+        M[17] = 0x02;
+        for (size_t i = 0; i < AES_BLOCK_SIZE; i++) {
+            M1[i] ^= xaes_ctx.k1[i];
+            M2[i] ^= xaes_ctx.k1[i];
+        }
+
+        CMAC_KDF_x2(M, derived_key, xaes_ctx.main_key);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> duration = end - start;
+
+    std::cout << "KDF_XAES_256_GCM_WITH_AVX_512: " << duration.count() << " seconds" << std::endl;
+
+    return true;
+}
+
+static bool Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512() {
+    const uint8_t key[32] = {
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+    struct xaes_256_gcm_ctx xaes_ctx;
+    static const uint8_t kZeroIn[AES_BLOCK_SIZE] = {0};
+    uint8_t L[AES_BLOCK_SIZE];
+    AES_set_encrypt_key(key, XAES_256_GCM_KEY_LENGTH << 3, &xaes_ctx.xaes_key);
+    AES_encrypt(kZeroIn, L, &xaes_ctx.xaes_key);
+    BINARY_FIELD_MUL_X_128(xaes_ctx.k1, L);
+    
+    uint8_t M1[AES_BLOCK_SIZE] = {0};
+    uint8_t M2[AES_BLOCK_SIZE] = {0};
+    uint8_t nonce[24] = {0};
+    uint8_t derived_key[32];
+	
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for(uint64_t i = 0; i < (uint64_t)1 << 24; ++i) {
+        OPENSSL_memcpy(nonce, &i, sizeof(i));
+
+        M1[1] = 0x01; 
+        M1[2] = 0x58; 
+        OPENSSL_memcpy(M1 + 4, nonce, 12);
+        OPENSSL_memcpy(M2, M1, AES_BLOCK_SIZE);
+        M2[1] = 0x02;
+
+        AES_encrypt(M1, derived_key, &xaes_ctx.xaes_key);
+        AES_encrypt(M2, derived_key + AES_BLOCK_SIZE, &xaes_ctx.xaes_key);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> duration = end - start;
+
+    std::cout << "Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512: " << duration.count() << " seconds" << std::endl;
+
+    return true;
+}
+
+__attribute__((target("vaes,avx512f,aes,sse2")))
+static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512() {
+    const uint8_t key[32] = {
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+    struct xaes_256_gcm_ctx xaes_ctx;
+    static const uint8_t kZeroIn[AES_BLOCK_SIZE] = {0};
+    uint8_t L[AES_BLOCK_SIZE];
+    AES_set_encrypt_key(key, XAES_256_GCM_KEY_LENGTH << 3, &xaes_ctx.xaes_key);
+    AES_encrypt(kZeroIn, L, &xaes_ctx.xaes_key);
+    BINARY_FIELD_MUL_X_128(xaes_ctx.k1, L);
+    aes_key_setup_enc(xaes_ctx.main_key, _mm256_loadu_si256((__m256i*)key));
+    
+	const uint8_t kc_prefix[5] = {0x58, 0x43, 0x4D, 0x54, 0x00};
+    uint8_t M[64] = {0}, nonce[24] = {0};
+	uint8_t X1[AES_BLOCK_SIZE * 4] = {0};
+    uint8_t temp[AES_BLOCK_SIZE * 4] = {0};
+	uint8_t *M1 = &M[0];
+	uint8_t *M2 = &M[AES_BLOCK_SIZE];
+	uint8_t *W1 = &M[AES_BLOCK_SIZE * 2];
+	uint8_t *W2 = &M[AES_BLOCK_SIZE * 3];
+	uint8_t derived_key_with_key_commitment[64];
+
+    auto start = std::chrono::high_resolution_clock::now();
+		
+    for(uint64_t i = 0; i < (uint64_t)1 << 24; ++i) {
+        OPENSSL_memcpy(nonce, &i, sizeof(i));
+        
+        OPENSSL_memcpy(temp, kc_prefix, 4);
+        OPENSSL_memcpy(temp + 4, nonce, 12);
+		CMAC_KDF_x4(temp, X1, xaes_ctx.main_key);
+		
+        M1[1] = 0x01; 
+        M1[2] = 0x58; 
+        OPENSSL_memcpy(M1 + 4, nonce, 12);
+        OPENSSL_memcpy(M2, M1, AES_BLOCK_SIZE);
+        M2[1] = 0x02;
+
+        OPENSSL_memcpy(W1, nonce + 12, 12);
+        W1[AES_BLOCK_SIZE - 4] = 0x00;
+        W1[AES_BLOCK_SIZE - 3] = 0x01;
+        W1[AES_BLOCK_SIZE - 2] = 0x00;
+        W1[AES_BLOCK_SIZE - 1] = 0x01;
+
+        OPENSSL_memcpy(W2, W1, AES_BLOCK_SIZE);
+        W2[AES_BLOCK_SIZE - 1] = 0x02;
+
+        for (size_t i = 0; i < AES_BLOCK_SIZE; i++) {
+			M1[i] ^= xaes_ctx.k1[i];
+            M2[i] ^= xaes_ctx.k1[i];
+            W1[i] ^= X1[i] ^ xaes_ctx.k1[i];
+            W2[i] ^= X1[i] ^ xaes_ctx.k1[i];
+        }
+
+        CMAC_KDF_x4(M, derived_key_with_key_commitment, xaes_ctx.main_key);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> duration = end - start;
+
+    std::cout << "Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512: " << duration.count() << " seconds" << std::endl;
+
+    return true;
+}
+
+static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512() {
+    const uint8_t key[32] = {
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+    struct xaes_256_gcm_ctx xaes_ctx;
+    static const uint8_t kZeroIn[AES_BLOCK_SIZE] = {0};
+    uint8_t L[AES_BLOCK_SIZE];
+    AES_set_encrypt_key(key, XAES_256_GCM_KEY_LENGTH << 3, &xaes_ctx.xaes_key);
+    AES_encrypt(kZeroIn, L, &xaes_ctx.xaes_key);
+    BINARY_FIELD_MUL_X_128(xaes_ctx.k1, L);
+    
+	const uint8_t kc_prefix[5] = {0x58, 0x43, 0x4D, 0x54, 0x00};
+    uint8_t nonce[24] = {0};
+	uint8_t X1[AES_BLOCK_SIZE] = {0};
+    uint8_t temp[AES_BLOCK_SIZE] = {0};
+	uint8_t M1[AES_BLOCK_SIZE] = {0};
+    uint8_t M2[AES_BLOCK_SIZE] = {0};
+	uint8_t W1[AES_BLOCK_SIZE] = {0};
+    uint8_t W2[AES_BLOCK_SIZE] = {0};
+	uint8_t derived_key[32], key_commitment[32];
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for(uint64_t i = 0; i < (uint64_t)1 << 24; ++i) {
+        OPENSSL_memcpy(nonce, &i, sizeof(i));
+
+        OPENSSL_memcpy(temp, kc_prefix, 4);
+        OPENSSL_memcpy(temp + 4, nonce, 12);
+        AES_encrypt(temp, X1, &xaes_ctx.xaes_key);
+
+        M1[1] = 0x01; 
+        M1[2] = 0x58; 
+        OPENSSL_memcpy(M1 + 4, nonce, 12);
+        OPENSSL_memcpy(M2, M1, AES_BLOCK_SIZE);
+        M2[1] = 0x02;
+
+        AES_encrypt(M1, derived_key, &xaes_ctx.xaes_key);
+        AES_encrypt(M2, derived_key + AES_BLOCK_SIZE, &xaes_ctx.xaes_key);
+
+        OPENSSL_memcpy(W1, nonce + 12, 12);
+        W1[AES_BLOCK_SIZE-4] = 0x00;
+        W1[AES_BLOCK_SIZE-3] = 0x01;
+        W1[AES_BLOCK_SIZE-2] = 0x00;
+        W1[AES_BLOCK_SIZE-1] = 0x01;
+        
+        OPENSSL_memcpy(W2, W1, AES_BLOCK_SIZE);
+        W2[AES_BLOCK_SIZE-1] = 0x02;
+
+        for (size_t i = 0; i < AES_BLOCK_SIZE; i++) {
+          M1[i] ^= xaes_ctx.k1[i];
+                M2[i] ^= xaes_ctx.k1[i];
+          W1[i] ^= X1[i] ^ xaes_ctx.k1[i];
+          W2[i] ^= X1[i] ^ xaes_ctx.k1[i];
+        }
+
+        AES_encrypt(W1, key_commitment, &xaes_ctx.xaes_key);
+        AES_encrypt(W2, key_commitment + AES_BLOCK_SIZE, &xaes_ctx.xaes_key);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> duration = end - start;
+
+    std::cout << "Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512: " << duration.count() << " seconds" << std::endl;
+
+    return true;
+}
+
 bool Speed(const std::vector<std::string> &args) {
+    Speed_KDF_XAES_256_GCM_WITH_AVX_512();
+    Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512();
+    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512();
+    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512();
+
 #if AWSLC_API_VERSION > 27
   OPENSSL_BEGIN_ALLOW_DEPRECATED
   // We started marking this as deprecated.
