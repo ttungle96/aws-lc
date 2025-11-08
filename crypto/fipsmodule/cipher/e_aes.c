@@ -1829,7 +1829,10 @@ int EVP_has_aes_hardware(void) {
 OPENSSL_MSVC_PRAGMA(warning(pop))
 
 /* ---------------------------- XAES-256-GCM ----------------------------
-Specification: https://github.com/C2SP/C2SP/blob/main/XAES-256-GCM.md 
+Specification: 
+https://github.com/C2SP/C2SP/blob/main/XAES-256-GCM.md 
+Extension to support nonce size less than 24 bytes: 
+https://eprint.iacr.org/2025/758.pdf#page=24
 -----------------------------------------------------------------------*/
 #define XAES_256_GCM_KEY_LENGTH      (AES_BLOCK_SIZE * 2)
 #define XAES_256_GCM_KEY_COMMIT_SIZE (AES_BLOCK_SIZE * 2)
@@ -1912,16 +1915,22 @@ static int CMAC_KDF_x4(uint8_t *in, uint8_t *out, __m128i *rk) {
 }
 
 /* 
-Left-shift a 128-bit register: https://words.filippo.io/xaes-256-gcm/ (line 2)
-If MSB₁(L) = 0: K1 = L << 1;
-Else: K1 = (L << 1) ⊕ (0x00, ..., 0x00, 0x87)
-*/
+The following function performs the step #2 of CMAC specified in: 
+https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38b.pdf#page=14 
+Only K1 is needed as the CMAC input is always a complete block. 
+Also note that K1 only depends on the input main key. 
+Pseudocode:   
+    If MSB(L) = 0: K1 = L << 1;
+    Else: K1 = (L << 1) ^ (0x00, ..., 0x00, 0x87) 
+*/ 
 #define BINARY_FIELD_MUL_X_128(out, in)             \
 do {                                                \
     unsigned i;                                     \
+    /* Shift |in| to left, including carry. */      \
     for (i = 0; i < 15; i++) {                      \
         out[i] = (in[i] << 1) | (in[i+1] >> 7);     \
     }                                               \
+    /* If MSB set fixup with R. */                  \
     const uint8_t carry = in[0] >> 7;               \
     out[i] = (in[i] << 1) ^ ((0 - carry) & 0x87);   \
 } while(0);
@@ -2015,12 +2024,12 @@ static int xaes_256_gcm_init(EVP_CIPHER_CTX *ctx, const uint8_t *key,
 
     XAES_256_GCM_CTX *xaes_ctx = xaes_256_gcm_from_cipher_ctx(ctx);
 
-    // Initialize the main key 
+    // When main key is provided, initialize the context and derive a subkey  
     if(key != NULL) {
         xaes_256_gcm_ctx_init(xaes_ctx, key);
     }
 
-    // Derive a subkey
+    // If iv is provided, even if main key is not, derive a subkey
     if(iv != NULL) {
         return xaes_256_gcm_set_gcm_key(ctx, iv, enc);
     }
@@ -2034,7 +2043,7 @@ DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_xaes_256_gcm) {
     out->block_size = AES_BLOCK_SIZE;
     out->key_len = XAES_256_GCM_KEY_LENGTH;
     out->iv_len = XAES_256_GCM_MAX_NONCE_SIZE;
-    out->ctx_size = sizeof(XAES_256_GCM_CTX) + EVP_AES_GCM_CTX_PADDING;
+    out->ctx_size = sizeof(XAES_256_GCM_CTX);
     out->flags = EVP_CIPH_GCM_MODE | EVP_CIPH_CUSTOM_IV | EVP_CIPH_CUSTOM_COPY |
                 EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
                 EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
@@ -2356,7 +2365,7 @@ DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_xaes_256_gcm_key_commit) {
     out->block_size = AES_BLOCK_SIZE;
     out->key_len = XAES_256_GCM_KEY_LENGTH;
     out->iv_len = XAES_256_GCM_MAX_NONCE_SIZE;
-    out->ctx_size = sizeof(XAES_256_GCM_KEY_COMMIT_CTX) + EVP_AES_GCM_CTX_PADDING;
+    out->ctx_size = sizeof(XAES_256_GCM_KEY_COMMIT_CTX);
     out->flags = EVP_CIPH_GCM_MODE | EVP_CIPH_CUSTOM_IV | EVP_CIPH_CUSTOM_COPY |
                 EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
                 EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
@@ -2443,7 +2452,7 @@ DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_xaes_256_gcm_key_commit_avx512) {
     out->block_size = AES_BLOCK_SIZE;
     out->key_len = XAES_256_GCM_KEY_LENGTH;
     out->iv_len = XAES_256_GCM_MAX_NONCE_SIZE;
-    out->ctx_size = sizeof(XAES_256_GCM_KEY_COMMIT_AVX512_CTX) + EVP_AES_GCM_CTX_PADDING;
+    out->ctx_size = sizeof(XAES_256_GCM_KEY_COMMIT_AVX512_CTX);
     out->flags = EVP_CIPH_GCM_MODE | EVP_CIPH_CUSTOM_IV | EVP_CIPH_CUSTOM_COPY |
                 EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
                 EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
