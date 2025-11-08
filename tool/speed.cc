@@ -2820,22 +2820,22 @@ static bool parseStringVectorToIntegerVector(
   return true;
 }
 
+// ---------------------------------------------------------------------
+// ------------ XAES-256-GCM w/ AVX-512 vector optimization ------------
+// ---------------------------------------------------------------------
+#include <immintrin.h>
+#include <wmmintrin.h>
+
 #define XAES_256_GCM_KEY_LENGTH      (AES_BLOCK_SIZE * 2)
 #define XAES_256_GCM_KEY_COMMIT_SIZE (AES_BLOCK_SIZE * 2)
 #define XAES_256_GCM_MAX_NONCE_SIZE  (AES_GCM_NONCE_LENGTH * 2)
 #define XAES_256_GCM_MIN_NONCE_SIZE  (20)
-
-#include <immintrin.h>
-#include <wmmintrin.h>
 
 struct xaes_256_gcm_ctx {
   AES_KEY xaes_key;
   uint8_t k1[AES_BLOCK_SIZE]; 
   __m128i main_key[15];
 };
-
-#include <immintrin.h>
-#include <wmmintrin.h>
 
 __attribute__((target("vaes,avx512vl,aes,sse2")))
 static inline __m128i aes128_keyexpand(__m128i key) {
