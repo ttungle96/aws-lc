@@ -990,3 +990,5 @@ xaes_256_gcm		999
 xaes_256_gcm_avx512		1000
 xaes_256_gcm_key_commit		1001
 xaes_256_gcm_key_commit_avx512		1002
+hmac_aes_256_gcm		1003
+hmac_aes_256_gcm_key_commit		1004

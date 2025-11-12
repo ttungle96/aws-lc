@@ -3291,6 +3291,8 @@ bool Speed(const std::vector<std::string> &args) {
        !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_key_commit(), "EVP-XAES-256-GCM-KEY-COMMIT", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_avx512(), "EVP-XAES-256-GCM-AVX512", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_xaes_256_gcm_key_commit_avx512(), "EVP-XAES-256-GCM-KEY-COMMIT-AVX512", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_hmac_aes_256_gcm(), "EVP-HMAC-AES-256-GCM", kTLSADLen, selected) ||
+       !SpeedEvpCipherGeneric(EVP_hmac_aes_256_gcm_key_commit(), "EVP-HMAC-AES-256-GCM-KC", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_128_ctr(), "EVP-AES-128-CTR", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_192_ctr(), "EVP-AES-192-CTR", kTLSADLen, selected) ||
        !SpeedEvpCipherGeneric(EVP_aes_256_ctr(), "EVP-AES-256-CTR", kTLSADLen, selected) ||

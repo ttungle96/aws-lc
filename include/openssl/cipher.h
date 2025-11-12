@@ -496,6 +496,8 @@ OPENSSL_EXPORT const EVP_CIPHER *EVP_xaes_256_gcm(void);
 OPENSSL_EXPORT const EVP_CIPHER *EVP_xaes_256_gcm_avx512(void);
 OPENSSL_EXPORT const EVP_CIPHER *EVP_xaes_256_gcm_key_commit(void);
 OPENSSL_EXPORT const EVP_CIPHER *EVP_xaes_256_gcm_key_commit_avx512(void);
+OPENSSL_EXPORT const EVP_CIPHER *EVP_hmac_aes_256_gcm(void);
+OPENSSL_EXPORT const EVP_CIPHER *EVP_hmac_aes_256_gcm_key_commit(void);
 
 OPENSSL_EXPORT const EVP_CIPHER *EVP_aes_128_ccm(void);
 OPENSSL_EXPORT const EVP_CIPHER *EVP_aes_192_ccm(void);

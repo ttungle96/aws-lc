@@ -374,6 +374,17 @@ typedef struct {
     uint8_t kc[AES_BLOCK_SIZE * 2];
 } XAES_256_GCM_KEY_COMMIT_AVX512_CTX;
 
+typedef struct {
+    EVP_AES_GCM_CTX aes_gcm_ctx;
+    HMAC_CTX *hmac_ctx;
+} HMAC_AES_256_GCM_CTX;
+
+typedef struct {
+    EVP_AES_GCM_CTX aes_gcm_ctx;
+    HMAC_CTX *hmac_ctx;
+    uint8_t kc[AES_BLOCK_SIZE * 2];
+} HMAC_AES_256_GCM_KC_CTX;
+
 static EVP_AES_GCM_CTX *aes_gcm_from_cipher_ctx(EVP_CIPHER_CTX *ctx) {
   OPENSSL_STATIC_ASSERT(
       alignof(EVP_AES_GCM_CTX) <= 16,
@@ -442,6 +453,26 @@ static EVP_AES_GCM_CTX *aes_gcm_from_cipher_ctx(EVP_CIPHER_CTX *ctx) {
       assert((uintptr_t)ptr % 8 == 0);
       ptr += (uintptr_t)ptr & 8;
       return &((XAES_256_GCM_KEY_COMMIT_AVX512_CTX *)ptr)->aes_gcm_ctx;        
+    case NID_hmac_aes_256_gcm:
+      assert(ctx->cipher->ctx_size == sizeof(HMAC_AES_256_GCM_CTX));
+      ptr = ctx->cipher_data;
+#if defined(OPENSSL_32_BIT)
+      assert((uintptr_t)ptr % 4 == 0);
+      ptr += (uintptr_t)ptr & 4;
+#endif
+      assert((uintptr_t)ptr % 8 == 0);
+      ptr += (uintptr_t)ptr & 8;
+      return &((HMAC_AES_256_GCM_CTX *)ptr)->aes_gcm_ctx;        
+    case NID_hmac_aes_256_gcm_key_commit:
+      assert(ctx->cipher->ctx_size == sizeof(HMAC_AES_256_GCM_KC_CTX));
+      ptr = ctx->cipher_data;
+#if defined(OPENSSL_32_BIT)
+      assert((uintptr_t)ptr % 4 == 0);
+      ptr += (uintptr_t)ptr & 4;
+#endif
+      assert((uintptr_t)ptr % 8 == 0);
+      ptr += (uintptr_t)ptr & 8;
+      return &((HMAC_AES_256_GCM_KC_CTX *)ptr)->aes_gcm_ctx;       
     default:
       break;
   }
@@ -2457,6 +2488,252 @@ DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_xaes_256_gcm_key_commit_avx512) {
                 EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
                 EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
     out->init = xaes_256_gcm_key_commit_avx512_init;
+    out->cipher = aes_gcm_cipher;
+    out->cleanup = aes_gcm_cleanup;
+    out->ctrl = aes_gcm_ctrl;
+}
+
+// ------------------------------------------------------------------------------
+// ---------------- EVP_CIPHER HMAC-SHA256 Without Key Commitment ---------------
+// ------------------------------------------------------------------------------
+static HMAC_AES_256_GCM_CTX *hmac_aes_256_gcm_from_cipher_ctx(EVP_CIPHER_CTX *ctx) { 
+    // Handle alignment according to the way it is implemented for the AES-GCM context
+    char *ptr = ctx->cipher_data;
+#if defined(OPENSSL_32_BIT)
+    assert((uintptr_t)ptr % 4 == 0);
+    ptr += (uintptr_t)ptr & 4;
+#endif
+    assert((uintptr_t)ptr % 8 == 0);
+    ptr += (uintptr_t)ptr & 8;
+    return (HMAC_AES_256_GCM_CTX *)ptr;
+}
+
+static int hmac_aes_256_gcm_ctx_init(HMAC_AES_256_GCM_CTX *hmac_aes_ctx, const uint8_t *key) {
+    if (!HMAC_Init_ex(hmac_aes_ctx->hmac_ctx, key, 32, EVP_sha256(), NULL)) {
+      return 0;
+    }
+    return 1;
+}
+
+static int hmac_aes_256_gcm_CMAC_derive_key(HMAC_AES_256_GCM_CTX *hmac_aes_ctx, 
+                                    const uint8_t* nonce, uint8_t *derived_key) {
+    uint8_t M1[AES_BLOCK_SIZE] = {0};
+
+    // M1[0 : 16] := 0x0001|0x58|0x00|N[: 12]
+    M1[1] = 0x01; // [TODO]: change the location of this 0x01 based on b
+    M1[2] = 0x58; // [TODO]: here too
+    // [TODO]: change the offset and length, when length 20 is supported
+    OPENSSL_memcpy(M1 + 4, nonce, 12);
+
+    // K_U[0:32] := HMAC-SHA256_K(0x0001|"X"|0x00|N[: 12])
+    uint8_t gcm_key[(256 >> 3)] = {0};
+    HMAC_CTX *hctx = hmac_aes_ctx->hmac_ctx;
+    unsigned int out_len = 0;
+    if (!HMAC_Init_ex(hctx, NULL, 0, NULL, NULL) ||
+        !HMAC_Update(hctx, M1, AES_BLOCK_SIZE) ||
+        !HMAC_Final(hctx, gcm_key, &out_len) ||
+        out_len != 2*AES_BLOCK_SIZE
+        ) {
+        return 0;
+    }
+    return 1;
+}
+
+static int hmac_aes_256_gcm_set_gcm_key(EVP_CIPHER_CTX *ctx, const uint8_t *nonce, int enc) {
+    HMAC_AES_256_GCM_CTX *hmac_aes_ctx = hmac_aes_256_gcm_from_cipher_ctx(ctx);
+    EVP_AES_GCM_CTX *gctx = &hmac_aes_ctx->aes_gcm_ctx;
+
+    uint8_t derived_key[XAES_256_GCM_KEY_LENGTH];
+
+    hmac_aes_256_gcm_CMAC_derive_key(hmac_aes_ctx, nonce, derived_key);
+
+    int ivlen = gctx->ivlen;
+
+    // AES-GCM uses a different size nonce than XAES-GCM,
+    // so to be able to call aes_gcm_init_key with ctx we temporarily
+    // set the nonce (iv) length to AES_GCM_NONCE_LENGTH.
+    gctx->ivlen = AES_GCM_NONCE_LENGTH;
+    
+    // For nonce size < 24 bytes
+    // Reference: https://eprint.iacr.org/2025/758.pdf#page=24
+    aes_gcm_init_key(ctx, derived_key, nonce + AES_GCM_NONCE_LENGTH, enc);
+
+    // Re-assign the original nonce size of XAES-256-GCM (20 <= |N| <= 24)
+    gctx->ivlen = ivlen;
+
+    return 1;
+}
+
+static int hmac_aes_256_gcm_init(EVP_CIPHER_CTX *ctx, const uint8_t *key,
+                            const uint8_t *iv, int enc) { 
+    // Key length: 32 bytes
+    if (ctx->key_len != XAES_256_GCM_KEY_LENGTH) {
+        OPENSSL_PUT_ERROR(CIPHER, CIPHER_R_BAD_KEY_LENGTH);
+        return 0;
+    }
+    
+    HMAC_AES_256_GCM_CTX *hmac_aes_ctx = hmac_aes_256_gcm_from_cipher_ctx(ctx);
+    
+    // When main key is provided, initialize the context and derive a subkey  
+    if(key != NULL) { 
+        if(!hmac_aes_ctx->hmac_ctx) {
+            hmac_aes_ctx->hmac_ctx = (HMAC_CTX*)malloc(sizeof(HMAC_CTX));
+        }
+        hmac_aes_256_gcm_ctx_init(hmac_aes_ctx, key);
+    }
+
+    // If iv is provided, even if main key is not, derive a subkey
+    if(iv != NULL) {
+        return hmac_aes_256_gcm_set_gcm_key(ctx, iv, enc);
+    }
+
+    return 1;
+}
+
+DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_hmac_aes_256_gcm) {
+    OPENSSL_memset(out, 0, sizeof(EVP_CIPHER));
+    out->nid = NID_hmac_aes_256_gcm;
+    out->block_size = AES_BLOCK_SIZE;
+    out->key_len = XAES_256_GCM_KEY_LENGTH;
+    out->iv_len = XAES_256_GCM_MAX_NONCE_SIZE;
+    out->ctx_size = sizeof(HMAC_AES_256_GCM_CTX);
+    out->flags = EVP_CIPH_GCM_MODE | EVP_CIPH_CUSTOM_IV | EVP_CIPH_CUSTOM_COPY |
+                EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
+                EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
+    out->init = hmac_aes_256_gcm_init;
+    out->cipher = aes_gcm_cipher;
+    out->cleanup = aes_gcm_cleanup;
+    out->ctrl = aes_gcm_ctrl;
+}
+
+// ------------------------------------------------------------------------------
+// ----------------- EVP_CIPHER HMAC-SHA256 With Key Commitment -----------------
+// ------------------------------------------------------------------------------
+static HMAC_AES_256_GCM_KC_CTX *hmac_aes_256_gcm_key_commit_from_cipher_ctx(EVP_CIPHER_CTX *ctx) { 
+    // Handle alignment according to the way it is implemented for the AES-GCM context
+    char *ptr = ctx->cipher_data;
+#if defined(OPENSSL_32_BIT)
+    assert((uintptr_t)ptr % 4 == 0);
+    ptr += (uintptr_t)ptr & 4;
+#endif
+    assert((uintptr_t)ptr % 8 == 0);
+    ptr += (uintptr_t)ptr & 8;
+    return (HMAC_AES_256_GCM_KC_CTX *)ptr;
+}
+
+static int hmac_aes_256_gcm_key_commit_ctx_init(HMAC_AES_256_GCM_KC_CTX *hmac_aes_ctx, const uint8_t *key) {
+    if (!HMAC_Init_ex(hmac_aes_ctx->hmac_ctx, key, 32, EVP_sha256(), NULL)) {
+      return 0;
+    }
+    return 1;
+}
+
+static int hmac_aes_256_gcm_CMAC_derive_key_and_key_commitment(HMAC_AES_256_GCM_KC_CTX *hmac_aes_ctx, const uint8_t* nonce, 
+                                                               uint8_t *derived_key, uint8_t *key_commitment) {
+    uint8_t M1[AES_BLOCK_SIZE] = {0};
+
+    // M1[0 : 16] := 0x0001|0x58|0x00|N[: 12]
+    M1[1] = 0x01; // [TODO]: change the location of this 0x01 based on b
+    M1[2] = 0x58; // [TODO]: here too
+    // [TODO]: change the offset and length, when length 20 is supported
+    OPENSSL_memcpy(M1 + 4, nonce, 12);
+
+    // K_U[0:32] := HMAC-SHA256_K(0x0001|"X"|0x00|N[: 12])
+    uint8_t gcm_key[(256 >> 3)] = {0};
+    HMAC_CTX *hctx = hmac_aes_ctx->hmac_ctx;
+    unsigned int out_len = 0;
+    if (!HMAC_Init_ex(hctx, NULL, 0, NULL, NULL) ||
+        !HMAC_Update(hctx, M1, AES_BLOCK_SIZE) ||
+        !HMAC_Final(hctx, gcm_key, &out_len) ||
+        out_len != 2*AES_BLOCK_SIZE
+        ) {
+        return 0;
+    }
+
+    uint8_t M3[2*AES_BLOCK_SIZE] = {0};
+    uint8_t kc_prefix[5] = {0x58, 0x43, 0x4D, 0x54, 0x00};
+    OPENSSL_memcpy(M3, kc_prefix, 5);
+    OPENSSL_memcpy(M3 + 5, nonce, 24);
+
+    M3[2*AES_BLOCK_SIZE-3] = 0x01;
+    M3[2*AES_BLOCK_SIZE-1] = 0x00;
+    M3[2*AES_BLOCK_SIZE-1] = 0x03;
+
+    // Key commitment
+    // K_C[0:32] := HMAC-SHA256_K("XCMT"|0x00|N[:24]|0x0100|0x03)
+    if (!HMAC_Init_ex(hctx, NULL, 0, NULL, NULL) ||
+        !HMAC_Update(hctx, M3, AES_BLOCK_SIZE * 2) ||
+        !HMAC_Final(hctx, hmac_aes_ctx->kc,  &out_len) ||
+        out_len != 2*AES_BLOCK_SIZE
+        ) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int hmac_aes_256_gcm_key_commit_set_gcm_key(EVP_CIPHER_CTX *ctx, const uint8_t *nonce, int enc) {
+    HMAC_AES_256_GCM_KC_CTX *hmac_aes_ctx = hmac_aes_256_gcm_key_commit_from_cipher_ctx(ctx);
+    EVP_AES_GCM_CTX *gctx = &hmac_aes_ctx->aes_gcm_ctx;
+
+    uint8_t derived_key[XAES_256_GCM_KEY_LENGTH];
+
+    hmac_aes_256_gcm_CMAC_derive_key_and_key_commitment(hmac_aes_ctx, nonce, derived_key, hmac_aes_ctx->kc);
+
+    int ivlen = gctx->ivlen;
+
+    // AES-GCM uses a different size nonce than XAES-GCM,
+    // so to be able to call aes_gcm_init_key with ctx we temporarily
+    // set the nonce (iv) length to AES_GCM_NONCE_LENGTH.
+    gctx->ivlen = AES_GCM_NONCE_LENGTH;
+    
+    // For nonce size < 24 bytes
+    // Reference: https://eprint.iacr.org/2025/758.pdf#page=24
+    aes_gcm_init_key(ctx, derived_key, nonce + AES_GCM_NONCE_LENGTH, enc);
+
+    // Re-assign the original nonce size of XAES-256-GCM (20 <= |N| <= 24)
+    gctx->ivlen = ivlen;
+
+    return 1;
+}
+
+static int hmac_aes_256_gcm_key_commit_init(EVP_CIPHER_CTX *ctx, const uint8_t *key,
+                            const uint8_t *iv, int enc) { 
+    // Key length: 32 bytes
+    if (ctx->key_len != XAES_256_GCM_KEY_LENGTH) {
+        OPENSSL_PUT_ERROR(CIPHER, CIPHER_R_BAD_KEY_LENGTH);
+        return 0;
+    }
+
+    HMAC_AES_256_GCM_KC_CTX *hmac_aes_ctx = hmac_aes_256_gcm_key_commit_from_cipher_ctx(ctx);
+
+    // Initialize the main key 
+    if(key != NULL) {
+        if(!hmac_aes_ctx->hmac_ctx) {
+            hmac_aes_ctx->hmac_ctx = (HMAC_CTX*)malloc(sizeof(HMAC_CTX));
+        }
+        hmac_aes_256_gcm_key_commit_ctx_init(hmac_aes_ctx, key);
+    }
+
+    // Derive a subkey
+    if(iv != NULL) {
+        return hmac_aes_256_gcm_key_commit_set_gcm_key(ctx, iv, enc);
+    }
+
+    return 1;
+}
+
+DEFINE_METHOD_FUNCTION(EVP_CIPHER, EVP_hmac_aes_256_gcm_key_commit) {
+    OPENSSL_memset(out, 0, sizeof(EVP_CIPHER));
+    out->nid = NID_hmac_aes_256_gcm_key_commit;
+    out->block_size = AES_BLOCK_SIZE;
+    out->key_len = XAES_256_GCM_KEY_LENGTH;
+    out->iv_len = XAES_256_GCM_MAX_NONCE_SIZE;
+    out->ctx_size = sizeof(HMAC_AES_256_GCM_KC_CTX);
+    out->flags = EVP_CIPH_GCM_MODE | EVP_CIPH_CUSTOM_IV | EVP_CIPH_CUSTOM_COPY |
+                EVP_CIPH_FLAG_CUSTOM_CIPHER | EVP_CIPH_ALWAYS_CALL_INIT |
+                EVP_CIPH_CTRL_INIT | EVP_CIPH_FLAG_AEAD_CIPHER;
+    out->init = hmac_aes_256_gcm_key_commit_init;
     out->cipher = aes_gcm_cipher;
     out->cleanup = aes_gcm_cleanup;
     out->ctrl = aes_gcm_ctrl;

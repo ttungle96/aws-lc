@@ -4407,6 +4407,16 @@ extern "C" {
 #define OBJ_xaes_256_gcm_key_commit_avx512 \
   2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 52L
 
+#define SN_hmac_aes_256_gcm "id-hmac-aes256-GCM"
+#define LN_hmac_aes_256_gcm "hmac-aes-256-gcm"
+#define NID_hmac_aes_256_gcm 1003
+#define OBJ_hmac_aes_256_gcm 2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 53L
+
+#define SN_hmac_aes_256_gcm_key_commit "id-hmac-aes256-GCM-KC"
+#define LN_hmac_aes_256_gcm_key_commit "hmac-aes-256-gcm-key-commit"
+#define NID_hmac_aes_256_gcm_key_commit 1004
+#define OBJ_hmac_aes_256_gcm_key_commit 2L, 16L, 840L, 1L, 101L, 3L, 4L, 1L, 54L
+
 #if defined(__cplusplus)
 } /* extern C */
 #endif
