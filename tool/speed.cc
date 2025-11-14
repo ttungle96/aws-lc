@@ -2932,7 +2932,7 @@ do {                                                \
 } while(0);
 
 __attribute__((target("vaes,avx512vl,aes,sse2")))
-static bool Speed_KDF_XAES_256_GCM_WITH_AVX_512() {
+static bool Speed_KDF_XAES_256_GCM_WITH_AVX_512(uint64_t n) {
     const uint8_t key[32] = {
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -2975,7 +2975,7 @@ static bool Speed_KDF_XAES_256_GCM_WITH_AVX_512() {
     return true;
 }
 
-static bool Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512() {
+static bool Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512(uint64_t n) {
     const uint8_t key[32] = {
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -3017,7 +3017,7 @@ static bool Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512() {
 }
 
 __attribute__((target("vaes,avx512f,aes,sse2")))
-static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512() {
+static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512(uint64_t n) {
     const uint8_t key[32] = {
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -3083,7 +3083,7 @@ static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512() {
     return true;
 }
 
-static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512() {
+static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512(uint64_t n) {
     const uint8_t key[32] = {
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
             0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -3153,11 +3153,13 @@ static bool Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512() {
 }
 
 bool Speed(const std::vector<std::string> &args) {
-    Speed_KDF_XAES_256_GCM_WITH_AVX_512();
-    Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512();
-    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512();
-    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512();
-
+    uint64_t n = (uint64_t)1 << 24;
+    printf("Time to derive %" PRIu64 " subkeys: \n", n);
+    Speed_KDF_XAES_256_GCM_WITH_AVX_512(n);
+    Speed_KDF_XAES_256_GCM_WITHOUT_AVX_512(n);
+    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITH_AVX_512(n);
+    Speed_KDF_XAES_256_GCM_KEY_COMMIT_WITHOUT_AVX_512(n);
+    
 #if AWSLC_API_VERSION > 27
   OPENSSL_BEGIN_ALLOW_DEPRECATED
   // We started marking this as deprecated.
